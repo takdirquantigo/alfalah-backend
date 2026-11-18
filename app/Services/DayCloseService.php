@@ -36,12 +36,12 @@ class DayCloseService
             $stoke = $this->stockForDate($date);
             $sales = Sales::query()
                 ->where('date', $date)
-                ->selectRaw('
+                ->selectRaw("
                     COALESCE(SUM(CAST(price AS DECIMAL(15,2))), 0) as total_sale,
-                    COALESCE(SUM(CAST(pay AS DECIMAL(15,2))), 0) as total_pay,
-                    COALESCE(SUM(CASE WHEN is_due_bill = 1 THEN CAST(pay AS DECIMAL(15,2)) ELSE 0 END), 0) as due_pay,
+                    COALESCE(SUM(CASE WHEN CAST(is_due_bill AS CHAR) = '1' THEN 0 ELSE CAST(pay AS DECIMAL(15,2)) END), 0) as total_pay,
+                    COALESCE(SUM(CASE WHEN CAST(is_due_bill AS CHAR) = '1' THEN CAST(pay AS DECIMAL(15,2)) ELSE 0 END), 0) as due_pay,
                     COALESCE(SUM(CAST(due AS DECIMAL(15,2))), 0) as total_due
-                ')
+                ")
                 ->first();
 
             $totalCost = Expense::query()
@@ -72,7 +72,7 @@ class DayCloseService
                 'due_pay' => $duePay,
                 'total_due' => $totalDue,
                 'total_cost' => $totalCostAmount,
-                'total_remain' => $totalPay - $totalCostAmount,
+                'total_remain' => $totalPay + $duePay - $totalCostAmount,
                 'date' => $date,
             ];
 

@@ -41,8 +41,17 @@ class ProductsController extends Controller
 
         try {
             DB::beginTransaction();
+            $stoke = Stoke::query()->latest('id')->lockForUpdate()->first() ?: $this->getOrCreateStoke();
+            $shortage = $this->emptyShortageMessage($stoke, $validated);
+            if ($shortage) {
+                DB::rollBack();
+                return response()->json([
+                    'status' => false,
+                    'message' => $shortage,
+                ], Response::HTTP_UNPROCESSABLE_ENTITY);
+            }
+
             $product = Products::create($validated);
-            $stoke = $this->getOrCreateStoke();
 
             $filledColumns = ['five_kg', 'twelve_kg', 'twentyfive_kg', 'thirtythree_kg', 'thirtyfive_kg', 'fourtyfive_kg', 'others_kg'];
             foreach ($filledColumns as $col) {
@@ -94,35 +103,104 @@ class ProductsController extends Controller
     public function getProducts(Request $request)
     {
         try {
-            $date = $request->input('params.search');
-            $perPage = $request->input('per_page', 15);
+            $search = $request->input('params.search') ?? $request->input('search');
+            $startDate = $request->input('params.start_date') ?? $request->input('start_date');
+            $endDate = $request->input('params.end_date') ?? $request->input('end_date');
+            $perPage = (int) ($request->input('params.per_page') ?? $request->input('per_page', 20));
+            $page = (int) ($request->input('params.page') ?? $request->input('page', 1));
+            if ($perPage < 1) {
+                $perPage = 20;
+            }
+            if ($page < 1) {
+                $page = 1;
+            }
 
             $query = Products::query();
 
-            if ($date) {
-                $query->where('date', 'like', '%' . $date . '%');
-            } else {
-                // Default last 60 days
-                $startDate = Carbon::now()->subDays(60)->startOfDay();
-                $endDate = Carbon::now()->endOfDay();
-                $query->whereBetween('created_at', [$startDate, $endDate]);
+            if ($search) {
+                $query->where('date', 'like', '%' . $search . '%');
             }
 
-            $products = $query->orderBy('created_at', 'desc')
-                ->paginate($perPage);
+            if ($startDate && $endDate && $startDate > $endDate) {
+                [$startDate, $endDate] = [$endDate, $startDate];
+            }
+
+            if ($startDate && $endDate) {
+                $query->whereBetween('date', [$startDate, $endDate]);
+            } elseif ($startDate) {
+                $query->where('date', '>=', $startDate);
+            } elseif ($endDate) {
+                $query->where('date', '<=', $endDate);
+            }
+
+            $totals = $this->sumProductColumns(clone $query);
+
+            $products = $query->orderBy('date', 'desc')
+                ->orderBy('id', 'desc')
+                ->paginate($perPage, ['*'], 'page', $page);
+
+            $today = Carbon::now('Asia/Dhaka');
+            $thisMonthStart = $today->copy()->startOfMonth()->toDateString();
+            $thisMonthEnd = $today->copy()->endOfMonth()->toDateString();
+            $lastMonth = $today->copy()->subMonthNoOverflow();
 
             return response()->json([
                 'status' => true,
                 'data' => $products,
+                'totals' => $totals,
+                'this_month' => $this->sumProductColumns(
+                    Products::query()->whereBetween('date', [$thisMonthStart, $thisMonthEnd])
+                ),
+                'last_month' => $this->sumProductColumns(
+                    Products::query()->whereBetween('date', [
+                        $lastMonth->copy()->startOfMonth()->toDateString(),
+                        $lastMonth->copy()->endOfMonth()->toDateString(),
+                    ])
+                ),
             ], 200);
 
         } catch (\Exception $e) {
             return response()->json([
                 'status' => false,
                 'message' => 'Something went wrong.',
-                'error' => $e->getMessage(), // useful for debugging
+                'error' => $e->getMessage(),
             ], 500);
         }
+    }
+
+    private function sumProductColumns($query): array
+    {
+        $columns = [
+            'five_kg',
+            'twelve_kg',
+            'twentyfive_kg',
+            'thirtythree_kg',
+            'thirtyfive_kg',
+            'fourtyfive_kg',
+            'others_kg',
+            'empty_five_kg',
+            'empty_twelve_kg',
+            'empty_twentyfive_kg',
+            'empty_thirtythree_kg',
+            'empty_thirtyfive_kg',
+            'empty_fourtyfive_kg',
+            'empty_others_kg',
+        ];
+
+        $selects = array_map(
+            fn ($column) => DB::raw("COALESCE(SUM(CAST(COALESCE(`{$column}`, 0) AS SIGNED)), 0) as `{$column}`"),
+            $columns
+        );
+        $selects[] = DB::raw('COALESCE(SUM(CAST(COALESCE(`price`, 0) AS DECIMAL(14,2))), 0) as `price`');
+
+        $row = $query->select($selects)->first();
+        $totals = [];
+        foreach ($columns as $column) {
+            $totals[$column] = (int) ($row->{$column} ?? 0);
+        }
+        $totals['price'] = (float) ($row->price ?? 0);
+
+        return $totals;
     }
 
 
@@ -345,6 +423,37 @@ public function updateProduct(Request $request, $id)
             \Log::error('Error adding product: ' . $e->getMessage());
             return response()->json(['error' => $e->getMessage()], Response::HTTP_INTERNAL_SERVER_ERROR);
         }
+    }
+
+    private function emptyShortageMessage($stoke, array $validated): ?string
+    {
+        $labels = [
+            'empty_five_kg' => '5 KG',
+            'empty_twelve_kg' => '12 KG',
+            'empty_twentyfive_kg' => '25 KG',
+            'empty_thirtythree_kg' => '33 KG',
+            'empty_thirtyfive_kg' => '35 KG',
+            'empty_fourtyfive_kg' => '45 KG',
+            'empty_others_kg' => 'Others',
+        ];
+
+        $parts = [];
+        foreach ($labels as $column => $label) {
+            $requested = (int) ($validated[$column] ?? 0);
+            if ($requested <= 0) {
+                continue;
+            }
+            $available = (int) ($stoke->{$column} ?? 0);
+            if ($requested > $available) {
+                $parts[] = $label.': available '.$available.', entered '.$requested;
+            }
+        }
+
+        if (!$parts) {
+            return null;
+        }
+
+        return 'Not enough empty cylinders. '.implode('. ', $parts).'.';
     }
 
     private function getOrCreateStoke(): Stoke

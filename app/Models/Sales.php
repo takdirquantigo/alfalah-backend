@@ -35,6 +35,7 @@ class Sales extends Model
         'date',
         'is_due_bill',
         'is_package',
+        'cylinder_price',
         'whole_sale',
         'price',
         'pay',
@@ -51,5 +52,10 @@ class Sales extends Model
     public function customer()
     {
         return $this->belongsTo(Customers::class, 'customer_id');
+    }
+
+    public function lines()
+    {
+        return $this->hasMany(SaleLine::class, 'sale_id');
     }
 }

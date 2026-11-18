@@ -162,6 +162,7 @@ class CustomerPortalController extends Controller
             $customer = $this->customer($request);
 
             $sale = Sales::query()
+                ->with('lines')
                 ->where('customer_id', $customer->id)
                 ->where('id', $id)
                 ->first();
@@ -188,14 +189,27 @@ class CustomerPortalController extends Controller
                 ];
             }
 
-            $pricingBreakdown = [
-                ['key' => 'price_5_kg', 'label' => '5 KG line total', 'amount' => $sale->price_5_kg],
-                ['key' => 'price_12_kg', 'label' => '12 KG line total', 'amount' => $sale->price_12_kg],
-                ['key' => 'price_25_kg', 'label' => '25 KG line total', 'amount' => $sale->price_25_kg],
-                ['key' => 'price_33_kg', 'label' => '33 KG line total', 'amount' => $sale->price_33_kg],
-                ['key' => 'price_35_kg', 'label' => '35 KG line total', 'amount' => $sale->price_35_kg],
-                ['key' => 'price_45_kg', 'label' => '45 KG line total', 'amount' => $sale->price_45_kg],
-            ];
+            if ($sale->lines->isNotEmpty()) {
+                $pricingBreakdown = $sale->lines->map(function ($line) {
+                    return [
+                        'key' => 'line-'.$line->id,
+                        'label' => $this->labelFor($line->size),
+                        'quantity' => (int) $line->quantity,
+                        'empty_quantity' => (int) $line->empty_quantity,
+                        'unit_price' => (int) $line->unit_price,
+                        'amount' => (int) $line->line_total,
+                    ];
+                })->values()->all();
+            } else {
+                $pricingBreakdown = [
+                    ['key' => 'price_5_kg', 'label' => '5 KG line total', 'amount' => $sale->price_5_kg],
+                    ['key' => 'price_12_kg', 'label' => '12 KG line total', 'amount' => $sale->price_12_kg],
+                    ['key' => 'price_25_kg', 'label' => '25 KG line total', 'amount' => $sale->price_25_kg],
+                    ['key' => 'price_33_kg', 'label' => '33 KG line total', 'amount' => $sale->price_33_kg],
+                    ['key' => 'price_35_kg', 'label' => '35 KG line total', 'amount' => $sale->price_35_kg],
+                    ['key' => 'price_45_kg', 'label' => '45 KG line total', 'amount' => $sale->price_45_kg],
+                ];
+            }
 
             return response()->json([
                 'status' => true,

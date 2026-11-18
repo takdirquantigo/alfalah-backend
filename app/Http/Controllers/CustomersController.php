@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Customers;
+use App\Models\Expense;
 use App\Models\Products;
 use App\Models\Sales;
 use App\Models\Stoke;
@@ -258,7 +259,10 @@ class CustomersController extends Controller
         }
 
 
-        $customers = $customers->paginate($perPage, ['*'], 'page', $page);
+        $customers = $customers
+            ->orderByDesc('customers.created_at')
+            ->orderByDesc('customers.id')
+            ->paginate($perPage, ['*'], 'page', $page);
 
         $customersTransformed = $customers->getCollection()->map(function ($customer) {
             $totalBuy = $customer->sales->sum('price');
@@ -491,7 +495,7 @@ class CustomersController extends Controller
                 ], Response::HTTP_NOT_FOUND);
             }
 
-            $query = Sales::where('customer_id', $id);
+            $query = Sales::with('lines')->where('customer_id', $id);
 
             if ($request->has('start_date') && $request->has('end_date')) {
                 $startDate = Carbon::parse($request->start_date)->startOfDay();
@@ -644,6 +648,9 @@ class CustomersController extends Controller
         $todaySale = $todayTotals?->total_sale ?? 0;
         $todayPaid = $todayTotals?->total_paid ?? 0;
         $todayDue = $todayTotals?->total_due ?? 0;
+        $totalExpense = $this->expenseSum($startDate, $endDate);
+        $todayExpense = $this->expenseSum($today, $today);
+        $monthExpense = $this->expenseSum($monthStart, $monthEnd);
         $collectBill = Sales::where('date', $today)->where('is_due_bill', 1)->sum('pay');
         $totalCustomer = Customers::count();
 
@@ -669,12 +676,25 @@ class CustomersController extends Controller
             'total_sale' => $total[0]->total_sale ?? 0,
             'total_paid' => $total[0]->total_paid ?? 0,
             'total_due' => $total[0]->total_due ?? 0,
+            'total_expense' => $totalExpense,
+            'today_expense' => $todayExpense,
             'month_sale' => $monthTotals?->total_sale ?? 0,
             'month_paid' => $monthTotals?->total_paid ?? 0,
             'month_due' => $monthTotals?->total_due ?? 0,
+            'month_expense' => $monthExpense,
             'current_stock' => $currentStoke,
             'top_customers' => $topCustomers,
         ]);
+    }
+
+    private function expenseSum(?string $startDate, ?string $endDate): float
+    {
+        $query = Expense::query();
+        if ($startDate && $endDate) {
+            $query->whereBetween('date', [$startDate, $endDate]);
+        }
+
+        return (float) $query->sum(DB::raw('CAST(amount AS DECIMAL(20,2))'));
     }
 
     public function dailySales(Request $request)
@@ -842,6 +862,34 @@ class CustomersController extends Controller
                 });
             }
 
+            $mapRow = function ($row) {
+                return [
+                    'customer_id' => $row->customer_id,
+                    'customer_name' => $row->customer_name,
+                    'phone' => $row->phone,
+                    'total_price' => round((float) $row->total_price, 2),
+                    'total_pay' => round((float) $row->total_pay, 2),
+                    'outstanding_due' => round((float) $row->outstanding_due, 2),
+                ];
+            };
+
+            if ($request->boolean('all')) {
+                $rows = (clone $outer)
+                    ->whereNotNull('balances.customer_id')
+                    ->orderBy('balances.customer_name')
+                    ->get()
+                    ->map($mapRow);
+
+                return response()->json([
+                    'status' => true,
+                    'summary' => [
+                        'filtered_outstanding' => round((float) $rows->sum('outstanding_due'), 2),
+                        'customers_with_due_count' => $rows->count(),
+                    ],
+                    'data' => $rows,
+                ], Response::HTTP_OK);
+            }
+
             $total = (clone $outer)->count();
             $filteredOutstanding = (float) ((clone $outer)->sum('outstanding_due') ?? 0);
 
@@ -850,16 +898,7 @@ class CustomersController extends Controller
                 ->offset(($page - 1) * $perPage)
                 ->limit($perPage)
                 ->get()
-                ->map(function ($row) {
-                    return [
-                        'customer_id' => $row->customer_id,
-                        'customer_name' => $row->customer_name,
-                        'phone' => $row->phone,
-                        'total_price' => round((float) $row->total_price, 2),
-                        'total_pay' => round((float) $row->total_pay, 2),
-                        'outstanding_due' => round((float) $row->outstanding_due, 2),
-                    ];
-                });
+                ->map($mapRow);
 
             $paginator = new LengthAwarePaginator(
                 $rows,
@@ -977,32 +1016,51 @@ class CustomersController extends Controller
                 $dueBySize[$filled] = (int) ($agg->{"due_{$filled}"} ?? 0);
             }
 
+            $mapRow = function ($row) {
+                $purchased = [];
+                $returned = [];
+                $due = [];
+
+                foreach (array_keys($this->cylinderSizePairs()) as $filled) {
+                    $purchased[$filled] = (int) $row->{"purchased_{$filled}"};
+                    $returned[$filled] = (int) $row->{"returned_{$filled}"};
+                    $due[$filled] = (int) $row->{"due_{$filled}"};
+                }
+
+                return [
+                    'customer_id' => $row->customer_id,
+                    'customer_name' => $row->customer_name,
+                    'phone' => $row->phone,
+                    'purchased' => $purchased,
+                    'returned' => $returned,
+                    'due' => $due,
+                    'total_cylinder_due' => (int) $row->total_cylinder_due,
+                ];
+            };
+
+            if ($request->boolean('all')) {
+                $rows = (clone $outer)
+                    ->whereNotNull('balances.customer_id')
+                    ->orderBy('balances.customer_name')
+                    ->get()
+                    ->map($mapRow);
+
+                return response()->json([
+                    'status' => true,
+                    'summary' => [
+                        'filtered_outstanding_cylinders' => (int) $rows->sum('total_cylinder_due'),
+                        'customers_with_due_count' => $rows->count(),
+                    ],
+                    'data' => $rows,
+                ], Response::HTTP_OK);
+            }
+
             $rows = (clone $outer)
                 ->orderByDesc('total_cylinder_due')
                 ->offset(($page - 1) * $perPage)
                 ->limit($perPage)
                 ->get()
-                ->map(function ($row) {
-                    $purchased = [];
-                    $returned = [];
-                    $due = [];
-
-                    foreach (array_keys($this->cylinderSizePairs()) as $filled) {
-                        $purchased[$filled] = (int) $row->{"purchased_{$filled}"};
-                        $returned[$filled] = (int) $row->{"returned_{$filled}"};
-                        $due[$filled] = (int) $row->{"due_{$filled}"};
-                    }
-
-                    return [
-                        'customer_id' => $row->customer_id,
-                        'customer_name' => $row->customer_name,
-                        'phone' => $row->phone,
-                        'purchased' => $purchased,
-                        'returned' => $returned,
-                        'due' => $due,
-                        'total_cylinder_due' => (int) $row->total_cylinder_due,
-                    ];
-                });
+                ->map($mapRow);
 
             $paginator = new LengthAwarePaginator(
                 $rows,

@@ -97,6 +97,7 @@ Route::middleware([AuthenticateWithToken::class])->prefix('sales')->group(functi
 
     Route::get('/details/{id}', [SalesController::class, 'details']);
     Route::post('/collection', [SalesController::class, 'collection']);
+    Route::post('/empty-return', [SalesController::class, 'emptyReturn']);
 });
 Route::middleware([])->prefix('items')->group(function () {
     Route::post('/', [ItemsController::class, 'store']);
